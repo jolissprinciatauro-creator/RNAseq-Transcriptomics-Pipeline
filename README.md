@@ -79,6 +79,12 @@ RNAseq-Transcriptomics-Pipeline/
 
 ---
 
+## Workflow
+
+![RNA-seq Transcriptomics Analysis Pipeline](RNAseq_Workflow_Diagram.png)
+
+---
+
 ## Workflow Description
 
 ### 01. Count Matrix Construction
