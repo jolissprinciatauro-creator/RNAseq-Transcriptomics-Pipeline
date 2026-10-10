@@ -1,0 +1,941 @@
+###############################################################
+# RNA-seq Transcriptomics Pipeline
+# Step 9: Cross-Comparison Consistency Analysis
+###############################################################
+#
+# Purpose:
+# Identify genes that show consistent differential-expression
+# direction across multiple biological comparisons.
+#
+# Main steps:
+# 1. Read DEG tables from multiple comparisons
+# 2. Extract log2 fold change and direction
+# 3. Merge comparisons by gene
+# 4. Count Up and Down directions
+# 5. Identify Mixed-direction genes
+# 6. Generate consistency tiers
+# 7. Calculate mean log2FC across significant comparisons
+# 8. Generate consistency summary plots
+#
+###############################################################
+
+
+##############################
+# 1. LOAD PACKAGES
+##############################
+
+library(openxlsx)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+
+
+##############################
+# 2. DEFINE INPUT / OUTPUT
+##############################
+
+# Add the authorized DEG files that you want
+# to compare.
+#
+# IMPORTANT:
+# Do not commit these private files to GitHub.
+#
+# Example structure:
+#
+# comparison_files <- c(
+#   Comparison_1 = "path/to/comparison_1.xlsx",
+#   Comparison_2 = "path/to/comparison_2.xlsx",
+#   Comparison_3 = "path/to/comparison_3.xlsx"
+# )
+
+comparison_files <- c(
+  Comparison_1 = "data/metadata/comparison_1_DEGs.xlsx",
+  Comparison_2 = "data/metadata/comparison_2_DEGs.xlsx",
+  Comparison_3 = "data/metadata/comparison_3_DEGs.xlsx"
+)
+
+
+output_dir <- "results/Cross_Comparison"
+
+dir.create(
+  output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+##############################
+# 3. CONSISTENCY PARAMETERS
+##############################
+
+# Minimum number of comparisons in which
+# the gene must be significant.
+
+CONSISTENCY_TIERS <- c(
+  3,
+  4
+)
+
+
+##############################
+# 4. CHECK INPUT FILES
+##############################
+
+missing_files <- comparison_files[
+  !file.exists(
+    comparison_files
+  )
+]
+
+if(
+  length(missing_files) > 0
+){
+
+  stop(
+    paste(
+      "The following comparison files were not found:\n",
+      paste(
+        missing_files,
+        collapse = "\n"
+      )
+    )
+  )
+
+}
+
+
+##############################
+# 5. READ EACH COMPARISON
+##############################
+
+comparison_tables <- imap(
+
+  comparison_files,
+
+  function(
+    file,
+    comparison_name
+  ){
+
+    df <- read.xlsx(
+      file
+    )
+
+
+    ##############################
+    # CHECK REQUIRED COLUMNS
+    ##############################
+
+    required_columns <- c(
+      "Gene",
+      "log2FoldChange"
+    )
+
+    missing_columns <- setdiff(
+      required_columns,
+      colnames(df)
+    )
+
+    if(
+      length(missing_columns) > 0
+    ){
+
+      stop(
+        paste(
+          "Missing columns in",
+          comparison_name,
+          ":",
+          paste(
+            missing_columns,
+            collapse = ", "
+          )
+        )
+      )
+
+    }
+
+
+    ##############################
+    # KEEP RELEVANT INFORMATION
+    ##############################
+
+    df <- df %>%
+
+      filter(
+
+        !is.na(
+          Gene
+        ),
+
+        !is.na(
+          log2FoldChange
+        )
+
+      ) %>%
+
+      distinct(
+        Gene,
+        .keep_all = TRUE
+      ) %>%
+
+      transmute(
+
+        Gene = Gene,
+
+        !!paste0(
+          "LFC_",
+          comparison_name
+        ) :=
+          log2FoldChange,
+
+        !!paste0(
+          "Dir_",
+          comparison_name
+        ) :=
+          ifelse(
+            log2FoldChange > 0,
+            "Up",
+            "Down"
+          )
+
+      )
+
+
+    return(
+      df
+    )
+
+  }
+
+)
+
+
+##############################
+# 6. MERGE ALL COMPARISONS
+##############################
+
+master <- reduce(
+
+  comparison_tables,
+
+  full_join,
+
+  by = "Gene"
+
+)
+
+
+##############################
+# 7. IDENTIFY DIRECTION COLUMNS
+##############################
+
+direction_columns <- grep(
+
+  "^Dir_",
+
+  colnames(master),
+
+  value = TRUE
+
+)
+
+
+##############################
+# 8. IDENTIFY LFC COLUMNS
+##############################
+
+lfc_columns <- grep(
+
+  "^LFC_",
+
+  colnames(master),
+
+  value = TRUE
+
+)
+
+
+##############################
+# 9. CALCULATE DIRECTION COUNTS
+##############################
+
+master <- master %>%
+
+  mutate(
+
+    n_up = rowSums(
+
+      across(
+
+        all_of(
+          direction_columns
+        ),
+
+        ~ .x == "Up"
+
+      ),
+
+      na.rm = TRUE
+
+    ),
+
+    n_down = rowSums(
+
+      across(
+
+        all_of(
+          direction_columns
+        ),
+
+        ~ .x == "Down"
+
+      ),
+
+      na.rm = TRUE
+
+    ),
+
+    n_sig =
+      n_up +
+      n_down
+
+  )
+
+
+##############################
+# 10. CLASSIFY CONSISTENCY
+##############################
+
+master <- master %>%
+
+  mutate(
+
+    Consistency = case_when(
+
+      n_up > 0 &
+        n_down > 0
+        ~ "Mixed",
+
+      n_up > 0
+        ~ "Up",
+
+      n_down > 0
+        ~ "Down",
+
+      TRUE
+        ~ NA_character_
+
+    )
+
+  )
+
+
+##############################
+# 11. CALCULATE MEAN log2FC
+##############################
+
+master$mean_log2FC <- rowMeans(
+
+  master[
+    ,
+    lfc_columns,
+    drop = FALSE
+  ],
+
+  na.rm = TRUE
+
+)
+
+
+##############################
+# 12. SAVE MASTER TABLE
+##############################
+
+master <- master %>%
+
+  select(
+
+    Gene,
+
+    all_of(
+      direction_columns
+    ),
+
+    all_of(
+      lfc_columns
+    ),
+
+    n_up,
+
+    n_down,
+
+    n_sig,
+
+    mean_log2FC,
+
+    Consistency
+
+  )
+
+
+write.xlsx(
+
+  master,
+
+  file.path(
+    output_dir,
+    "Master_Consistency_Table.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+###############################################################
+# PART B — REMOVE MIXED-DIRECTION GENES
+###############################################################
+
+clean <- master %>%
+
+  filter(
+
+    Consistency != "Mixed",
+
+    !is.na(
+      Consistency
+    )
+
+  )
+
+
+###############################################################
+# PART C — GENERATE CONSISTENCY TIERS
+###############################################################
+
+total_comparisons <-
+  length(
+    comparison_files
+  )
+
+
+for(
+  tier in CONSISTENCY_TIERS
+){
+
+  tier_df <- clean %>%
+
+    filter(
+      n_sig >= tier
+    )
+
+
+  up_df <- tier_df %>%
+
+    filter(
+      Consistency == "Up"
+    )
+
+
+  down_df <- tier_df %>%
+
+    filter(
+      Consistency == "Down"
+    )
+
+
+  suffix <- paste0(
+    "ge",
+    tier
+  )
+
+
+  write.xlsx(
+
+    up_df,
+
+    file.path(
+      output_dir,
+      paste0(
+        "Up_",
+        suffix,
+        "_of_",
+        total_comparisons,
+        ".xlsx"
+      )
+    ),
+
+    overwrite = TRUE
+
+  )
+
+
+  write.xlsx(
+
+    down_df,
+
+    file.path(
+      output_dir,
+      paste0(
+        "Down_",
+        suffix,
+        "_of_",
+        total_comparisons,
+        ".xlsx"
+      )
+    ),
+
+    overwrite = TRUE
+
+  )
+
+}
+
+
+###############################################################
+# PART D — ALL-COMPARISONS CONSISTENCY
+###############################################################
+
+all_comparison_up <- clean %>%
+
+  filter(
+
+    Consistency == "Up",
+
+    n_sig ==
+      total_comparisons
+
+  )
+
+
+all_comparison_down <- clean %>%
+
+  filter(
+
+    Consistency == "Down",
+
+    n_sig ==
+      total_comparisons
+
+  )
+
+
+write.xlsx(
+
+  all_comparison_up,
+
+  file.path(
+    output_dir,
+    paste0(
+      "Up_all_",
+      total_comparisons,
+      "_comparisons.xlsx"
+    )
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+write.xlsx(
+
+  all_comparison_down,
+
+  file.path(
+    output_dir,
+    paste0(
+      "Down_all_",
+      total_comparisons,
+      "_comparisons.xlsx"
+    )
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+###############################################################
+# PART E — CONSISTENCY SUMMARY
+###############################################################
+
+summary_table <- bind_rows(
+
+  lapply(
+
+    c(
+      CONSISTENCY_TIERS,
+      total_comparisons
+    ),
+
+    function(tier){
+
+      tier_df <- clean %>%
+
+        filter(
+          n_sig >= tier
+        )
+
+
+      data.frame(
+
+        Consistency_Tier =
+          paste0(
+            ">= ",
+            tier,
+            " / ",
+            total_comparisons
+          ),
+
+        Up =
+          sum(
+            tier_df$Consistency ==
+              "Up"
+          ),
+
+        Down =
+          sum(
+            tier_df$Consistency ==
+              "Down"
+          )
+
+      )
+
+    }
+
+  )
+
+)
+
+
+write.xlsx(
+
+  summary_table,
+
+  file.path(
+    output_dir,
+    "Consistency_Summary.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+###############################################################
+# PART F — CONSISTENCY BAR PLOT
+###############################################################
+
+plot_df <- summary_table %>%
+
+  tidyr::pivot_longer(
+
+    cols =
+      c(
+        Up,
+        Down
+      ),
+
+    names_to =
+      "Direction",
+
+    values_to =
+      "Gene_Count"
+
+  )
+
+
+p_bar <- ggplot(
+
+  plot_df,
+
+  aes(
+    x =
+      Consistency_Tier,
+
+    y =
+      Gene_Count,
+
+    fill =
+      Direction
+
+  )
+
+) +
+
+  geom_col(
+
+    position =
+      position_dodge(
+        width = 0.7
+      ),
+
+    width = 0.6
+
+  ) +
+
+  geom_text(
+
+    aes(
+      label =
+        Gene_Count
+    ),
+
+    position =
+      position_dodge(
+        width = 0.7
+      ),
+
+    vjust =
+      -0.4,
+
+    size =
+      4
+
+  ) +
+
+  labs(
+
+    title =
+      "Cross-Comparison DEG Consistency",
+
+    subtitle =
+      paste0(
+        "Genes consistently Up or Down across ",
+        total_comparisons,
+        " comparisons"
+      ),
+
+    x =
+      "Consistency tier",
+
+    y =
+      "Number of genes",
+
+    fill =
+      "Direction"
+
+  ) +
+
+  theme_classic(
+    base_size = 13
+  )
+
+
+ggsave(
+
+  file.path(
+    output_dir,
+    "Consistency_BarChart.png"
+  ),
+
+  p_bar,
+
+  width = 9,
+
+  height = 7,
+
+  dpi = 600
+
+)
+
+
+###############################################################
+# PART G — META-VOLCANO
+###############################################################
+
+master_plot <- master
+
+master_plot$Consistency[
+  is.na(
+    master_plot$Consistency
+  )
+] <- "Mixed"
+
+
+master_plot$Consistency <- factor(
+
+  master_plot$Consistency,
+
+  levels = c(
+    "Up",
+    "Down",
+    "Mixed"
+  )
+
+)
+
+
+p_meta <- ggplot(
+
+  master_plot,
+
+  aes(
+
+    x =
+      mean_log2FC,
+
+    y =
+      n_sig,
+
+    colour =
+      Consistency
+
+  )
+
+) +
+
+  geom_jitter(
+
+    height =
+      0.15,
+
+    width =
+      0,
+
+    alpha =
+      0.6,
+
+    size =
+      2
+
+  ) +
+
+  geom_vline(
+
+    xintercept =
+      0,
+
+    linetype =
+      "dashed"
+
+  ) +
+
+  geom_hline(
+
+    yintercept =
+      CONSISTENCY_TIERS,
+
+    linetype =
+      "dotted"
+
+  ) +
+
+  scale_y_continuous(
+
+    breaks =
+      0:total_comparisons,
+
+    limits =
+      c(
+        0,
+        total_comparisons + 0.5
+      )
+
+  ) +
+
+  labs(
+
+    title =
+      "Consistency vs Magnitude of Differential Expression",
+
+    subtitle =
+      "Each point represents one gene",
+
+    x =
+      "Mean log2 Fold Change",
+
+    y =
+      "Number of significant comparisons",
+
+    colour =
+      "Direction"
+
+  ) +
+
+  theme_classic(
+    base_size = 13
+  )
+
+
+ggsave(
+
+  file.path(
+    output_dir,
+    "MetaVolcano_Consistency_vs_Magnitude.png"
+  ),
+
+  p_meta,
+
+  width = 10,
+
+  height = 7,
+
+  dpi = 600
+
+)
+
+
+###############################################################
+# PART H — PRINT SUMMARY
+###############################################################
+
+cat(
+  "\n============================================\n"
+)
+
+cat(
+  "CROSS-COMPARISON CONSISTENCY ANALYSIS COMPLETE\n"
+)
+
+cat(
+  "============================================\n"
+)
+
+cat(
+  "Number of comparisons:",
+  total_comparisons,
+  "\n"
+)
+
+cat(
+  "Genes in master table:",
+  nrow(master),
+  "\n"
+)
+
+cat(
+  "Consistent genes:",
+  nrow(clean),
+  "\n"
+)
+
+cat(
+  "Mixed-direction genes:",
+
+  sum(
+    master$Consistency ==
+      "Mixed",
+
+    na.rm = TRUE
+
+  ),
+
+  "\n"
+)
+
+cat(
+  "\nOutput folder:",
+  output_dir,
+  "\n"
+)
+
+cat(
+  "============================================\n"
+)
+
+
+###############################################################
+# END OF STEP 9
+###############################################################
