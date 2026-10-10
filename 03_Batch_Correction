@@ -1,0 +1,437 @@
+###############################################################
+# RNA-seq Transcriptomics Pipeline
+# Step 3: Batch Correction using ComBat-seq
+###############################################################
+#
+# Purpose:
+# Correct unwanted technical variation associated with
+# sequencing/processing batches while preserving the
+# biological group structure.
+#
+# Input:
+# - Raw RNA-seq count matrix
+# - Sample metadata containing:
+#     Sample_ID
+#     Batch
+#     Group
+#
+# Method:
+# ComBat-seq
+#
+# Output:
+# Batch-corrected RNA-seq count matrix
+#
+###############################################################
+
+
+##############################
+# 1. LOAD PACKAGES
+##############################
+
+library(sva)
+library(openxlsx)
+
+
+##############################
+# 2. DEFINE INPUT / OUTPUT
+##############################
+
+count_file <- "results/raw_count_matrix.xlsx"
+
+metadata_file <- "data/metadata/batch_metadata.xlsx"
+
+output_dir <- "results/Batch_Correction"
+
+dir.create(
+  output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+##############################
+# 3. READ COUNT MATRIX
+##############################
+
+counts <- read.xlsx(
+  count_file
+)
+
+
+##############################
+# 4. SET GENE IDENTIFIERS
+#    AS ROW NAMES
+##############################
+
+rownames(counts) <- counts$Ensid
+
+counts <- counts[
+  ,
+  !names(counts) %in% "Ensid",
+  drop = FALSE
+]
+
+
+##############################
+# 5. CONVERT COUNTS TO NUMERIC
+##############################
+
+counts <- as.data.frame(
+  counts,
+  check.names = FALSE
+)
+
+counts[] <- lapply(
+  counts,
+  as.numeric
+)
+
+
+##############################
+# 6. READ SAMPLE METADATA
+##############################
+
+batch <- read.xlsx(
+  metadata_file
+)
+
+
+##############################
+# 7. CHECK REQUIRED COLUMNS
+##############################
+
+required_columns <- c(
+  "Sample_ID",
+  "Batch",
+  "Group"
+)
+
+missing_columns <- setdiff(
+  required_columns,
+  colnames(batch)
+)
+
+if(length(missing_columns) > 0){
+
+  stop(
+    paste(
+      "Missing required metadata columns:",
+      paste(
+        missing_columns,
+        collapse = ", "
+      )
+    )
+  )
+
+}
+
+
+##############################
+# 8. KEEP REQUIRED METADATA
+##############################
+
+batch <- batch[
+  ,
+  required_columns,
+  drop = FALSE
+]
+
+
+##############################
+# 9. MATCH METADATA TO
+#    COUNT MATRIX
+##############################
+
+sample_cols <- match(
+  batch$Sample_ID,
+  colnames(counts)
+)
+
+
+##############################
+# 10. CHECK FOR MISSING SAMPLES
+##############################
+
+if(any(is.na(sample_cols))){
+
+  cat(
+    "\nSamples present in metadata ",
+    "but missing from count matrix:\n"
+  )
+
+  print(
+    batch$Sample_ID[
+      is.na(sample_cols)
+    ]
+  )
+
+  stop(
+    "Sample matching failed. Check sample identifiers."
+  )
+
+}
+
+
+##############################
+# 11. REORDER COUNT MATRIX
+#     TO MATCH METADATA
+##############################
+
+counts <- counts[
+  ,
+  sample_cols,
+  drop = FALSE
+]
+
+
+##############################
+# 12. VERIFY SAMPLE ORDER
+##############################
+
+match_check <- data.frame(
+
+  Metadata_Sample = batch$Sample_ID,
+
+  CountMatrix_Sample = colnames(counts),
+
+  Match =
+    batch$Sample_ID ==
+    colnames(counts),
+
+  stringsAsFactors = FALSE
+
+)
+
+
+if(!all(match_check$Match)){
+
+  stop(
+    "Sample order does not match between metadata and count matrix."
+  )
+
+}
+
+
+##############################
+# 13. SAVE MATCHING REPORT
+##############################
+
+write.xlsx(
+  match_check,
+  file.path(
+    output_dir,
+    "Sample_Matching_Check.xlsx"
+  ),
+  overwrite = TRUE
+)
+
+
+##############################
+# 14. CONVERT TO MATRIX
+##############################
+
+counts <- as.matrix(
+  counts
+)
+
+
+##############################
+# 15. CHECK COUNT VALUES
+##############################
+
+if(any(is.na(counts))){
+
+  stop(
+    "Missing values detected in the count matrix."
+  )
+
+}
+
+if(any(counts < 0)){
+
+  stop(
+    "Negative values detected in the count matrix."
+  )
+
+}
+
+
+##############################
+# 16. CHECK BATCH STRUCTURE
+##############################
+
+batch_vector <- factor(
+  batch$Batch
+)
+
+group_vector <- factor(
+  batch$Group
+)
+
+
+cat(
+  "\nBatch sizes before correction:\n"
+)
+
+print(
+  table(batch_vector)
+)
+
+
+##############################
+# 17. CHECK FOR SINGLETON BATCHES
+##############################
+
+batch_sizes <- table(
+  batch_vector
+)
+
+singleton_batches <- names(
+  batch_sizes[
+    batch_sizes < 2
+  ]
+)
+
+
+if(length(singleton_batches) > 0){
+
+  stop(
+    paste(
+      "ComBat-seq cannot be safely applied with",
+      "singleton batch levels.",
+      "\nResolve the batch design according to the",
+      "study protocol before running batch correction.",
+      "\nSingleton batch(es):",
+      paste(
+        singleton_batches,
+        collapse = ", "
+      )
+    )
+  )
+
+}
+
+
+##############################
+# 18. RUN COMBAT-SEQ
+##############################
+
+batch_corrected <- ComBat_seq(
+
+  counts = counts,
+
+  batch = batch_vector,
+
+  group = group_vector,
+
+  covar_mod = NULL,
+
+  full_mod = TRUE,
+
+  shrink = FALSE,
+
+  shrink.disp = FALSE,
+
+  gene.subset.n = NULL
+
+)
+
+
+##############################
+# 19. CONVERT CORRECTED MATRIX
+#     TO DATA FRAME
+##############################
+
+batch_corrected <- data.frame(
+
+  Ensid = rownames(
+    batch_corrected
+  ),
+
+  batch_corrected,
+
+  check.names = FALSE
+
+)
+
+
+##############################
+# 20. SAVE CORRECTED COUNTS
+##############################
+
+write.xlsx(
+
+  batch_corrected,
+
+  file.path(
+    output_dir,
+    "batch_corrected_count_matrix.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 21. SUMMARY
+##############################
+
+cat(
+  "\n========================================\n"
+)
+
+cat(
+  "ComBat-seq batch correction completed.\n"
+)
+
+cat(
+  "========================================\n"
+)
+
+cat(
+  "Genes processed:",
+  nrow(batch_corrected),
+  "\n"
+)
+
+cat(
+  "Samples processed:",
+  ncol(batch_corrected) - 1,
+  "\n"
+)
+
+cat(
+  "Number of batches:",
+  length(unique(batch_vector)),
+  "\n"
+)
+
+cat(
+  "\nBatch sizes:\n"
+)
+
+print(
+  table(batch_vector)
+)
+
+cat(
+  "\nOutput:\n"
+)
+
+cat(
+  file.path(
+    output_dir,
+    "batch_corrected_count_matrix.xlsx"
+  ),
+  "\n"
+)
+
+cat(
+  "========================================\n"
+)
+
+
+###############################################################
+# END OF STEP 3
+###############################################################
