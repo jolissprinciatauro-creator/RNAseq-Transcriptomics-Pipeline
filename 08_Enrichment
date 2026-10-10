@@ -1,0 +1,1330 @@
+###############################################################
+# RNA-seq Transcriptomics Pipeline
+# Step 8: Functional Enrichment and GSEA
+#
+# Includes:
+#   1. GO enrichment
+#   2. KEGG pathway enrichment
+#   3. Reactome pathway enrichment
+#   4. GSEA using the complete ranked gene list
+###############################################################
+
+
+###############################################################
+# 1. LOAD PACKAGES
+###############################################################
+
+library(openxlsx)
+library(dplyr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(enrichplot)
+library(ggplot2)
+
+
+###############################################################
+# 2. DEFINE INPUT / OUTPUT
+###############################################################
+
+deg_file <- paste0(
+  "results/Differential_Expression/",
+  "03_Wald_Test/Wald_All_Genes.xlsx"
+)
+
+output_dir <- "results/Enrichment"
+
+dir.create(
+  output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+go_dir <- file.path(
+  output_dir,
+  "GO"
+)
+
+kegg_dir <- file.path(
+  output_dir,
+  "KEGG"
+)
+
+reactome_dir <- file.path(
+  output_dir,
+  "Reactome"
+)
+
+gsea_dir <- file.path(
+  output_dir,
+  "GSEA"
+)
+
+dir.create(
+  go_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  kegg_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  reactome_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  gsea_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+###############################################################
+# 3. ENRICHMENT PARAMETERS
+###############################################################
+
+PADJ_CUTOFF <- 0.05
+
+LOG2FC_CUTOFF <- 1.2
+
+
+###############################################################
+# 4. READ DESEQ2 RESULTS
+###############################################################
+
+deg <- read.xlsx(
+  deg_file
+)
+
+
+###############################################################
+# 5. CHECK REQUIRED COLUMNS
+###############################################################
+
+required_columns <- c(
+  "Gene",
+  "log2FoldChange",
+  "padj",
+  "stat"
+)
+
+missing_columns <- setdiff(
+  required_columns,
+  colnames(deg)
+)
+
+if(length(missing_columns) > 0){
+
+  stop(
+    paste(
+      "Missing required columns:",
+      paste(
+        missing_columns,
+        collapse = ", "
+      )
+    )
+  )
+
+}
+
+
+###############################################################
+# 6. REMOVE INVALID RESULTS
+###############################################################
+
+deg <- deg %>%
+
+  filter(
+
+    !is.na(
+      Gene
+    ),
+
+    !is.na(
+      log2FoldChange
+    ),
+
+    !is.na(
+      padj
+    )
+
+  )
+
+
+###############################################################
+# 7. DEFINE SIGNIFICANT DEGs
+###############################################################
+
+deg_sig <- deg %>%
+
+  filter(
+
+    padj < PADJ_CUTOFF,
+
+    abs(
+      log2FoldChange
+    ) >= LOG2FC_CUTOFF
+
+  )
+
+
+###############################################################
+# 8. DEFINE UPREGULATED GENES
+###############################################################
+
+up_genes <- deg_sig %>%
+
+  filter(
+    log2FoldChange >=
+      LOG2FC_CUTOFF
+  ) %>%
+
+  pull(
+    Gene
+  ) %>%
+
+  unique()
+
+
+###############################################################
+# 9. DEFINE DOWNREGULATED GENES
+###############################################################
+
+down_genes <- deg_sig %>%
+
+  filter(
+    log2FoldChange <=
+      -LOG2FC_CUTOFF
+  ) %>%
+
+  pull(
+    Gene
+  ) %>%
+
+  unique()
+
+
+###############################################################
+# 10. CREATE GENE SET LIST
+###############################################################
+
+gene_sets <- list(
+
+  All_Significant =
+    unique(
+      deg_sig$Gene
+    ),
+
+  Upregulated =
+    up_genes,
+
+  Downregulated =
+    down_genes
+
+)
+
+
+###############################################################
+# 11. MAP GENE SYMBOLS TO ENTREZ IDs
+###############################################################
+
+id_maps <- lapply(
+
+  gene_sets,
+
+  function(genes){
+
+    if(
+      length(genes) < 2
+    ){
+
+      return(
+        NULL
+      )
+
+    }
+
+    mapping <- tryCatch(
+
+      bitr(
+
+        genes,
+
+        fromType = "SYMBOL",
+
+        toType = "ENTREZID",
+
+        OrgDb = org.Hs.eg.db
+
+      ),
+
+      error = function(e){
+
+        message(
+          "Gene mapping failed: ",
+          conditionMessage(e)
+        )
+
+        NULL
+
+      }
+
+    )
+
+    mapping
+
+  }
+
+)
+
+
+###############################################################
+# 12. GO ENRICHMENT FUNCTION
+###############################################################
+
+run_GO <- function(
+  genes,
+  gene_set_name
+){
+
+  if(
+    length(genes) < 2
+  ){
+
+    return(
+      NULL
+    )
+
+  }
+
+
+  ego <- tryCatch(
+
+    enrichGO(
+
+      gene =
+        genes,
+
+      OrgDb =
+        org.Hs.eg.db,
+
+      keyType =
+        "SYMBOL",
+
+      ont =
+        "ALL",
+
+      pAdjustMethod =
+        "BH",
+
+      pvalueCutoff =
+        0.05,
+
+      qvalueCutoff =
+        0.05,
+
+      readable =
+        TRUE
+
+    ),
+
+    error = function(e){
+
+      message(
+        "GO enrichment failed for ",
+        gene_set_name,
+        ": ",
+        conditionMessage(e)
+      )
+
+      NULL
+
+    }
+
+  )
+
+
+  if(
+    !is.null(ego) &&
+    nrow(
+      as.data.frame(ego)
+    ) > 0
+  ){
+
+    result_df <-
+      as.data.frame(
+        ego
+      )
+
+
+    write.xlsx(
+
+      result_df,
+
+      file.path(
+        go_dir,
+        paste0(
+          "GO_",
+          gene_set_name,
+          ".xlsx"
+        )
+      ),
+
+      overwrite = TRUE
+
+    )
+
+
+    pdf(
+
+      file.path(
+        go_dir,
+        paste0(
+          "GO_",
+          gene_set_name,
+          "_dotplot.pdf"
+        )
+      ),
+
+      width = 11,
+
+      height = 8
+
+    )
+
+    print(
+      dotplot(
+        ego,
+        showCategory = 20
+      )
+    )
+
+    dev.off()
+
+  }
+
+
+  return(
+    ego
+  )
+
+}
+
+
+###############################################################
+# 13. KEGG ENRICHMENT FUNCTION
+###############################################################
+
+run_KEGG <- function(
+  id_map,
+  gene_set_name
+){
+
+  if(
+    is.null(id_map) ||
+    nrow(id_map) < 2
+  ){
+
+    return(
+      NULL
+    )
+
+  }
+
+
+  ekegg <- tryCatch(
+
+    enrichKEGG(
+
+      gene =
+        unique(
+          id_map$ENTREZID
+        ),
+
+      organism =
+        "hsa",
+
+      pAdjustMethod =
+        "BH",
+
+      pvalueCutoff =
+        0.05,
+
+      qvalueCutoff =
+        0.05
+
+    ),
+
+    error = function(e){
+
+      message(
+        "KEGG enrichment failed for ",
+        gene_set_name,
+        ": ",
+        conditionMessage(e)
+      )
+
+      NULL
+
+    }
+
+  )
+
+
+  if(
+    !is.null(ekegg) &&
+    nrow(
+      as.data.frame(ekegg)
+    ) > 0
+  ){
+
+    result_df <-
+      as.data.frame(
+        ekegg
+      )
+
+
+    write.xlsx(
+
+      result_df,
+
+      file.path(
+        kegg_dir,
+        paste0(
+          "KEGG_",
+          gene_set_name,
+          ".xlsx"
+        )
+      ),
+
+      overwrite = TRUE
+
+    )
+
+
+    pdf(
+
+      file.path(
+        kegg_dir,
+        paste0(
+          "KEGG_",
+          gene_set_name,
+          "_dotplot.pdf"
+        )
+      ),
+
+      width = 11,
+
+      height = 8
+
+    )
+
+    print(
+      dotplot(
+        ekegg,
+        showCategory = 20
+      )
+    )
+
+    dev.off()
+
+  }
+
+
+  return(
+    ekegg
+  )
+
+}
+
+
+###############################################################
+# 14. REACTOME ENRICHMENT FUNCTION
+###############################################################
+
+run_Reactome <- function(
+  id_map,
+  gene_set_name
+){
+
+  if(
+    is.null(id_map) ||
+    nrow(id_map) < 2
+  ){
+
+    return(
+      NULL
+    )
+
+  }
+
+
+  ereact <- tryCatch(
+
+    enrichPathway(
+
+      gene =
+        unique(
+          id_map$ENTREZID
+        ),
+
+      organism =
+        "human",
+
+      pAdjustMethod =
+        "BH",
+
+      pvalueCutoff =
+        0.05,
+
+      qvalueCutoff =
+        0.05,
+
+      readable =
+        TRUE
+
+    ),
+
+    error = function(e){
+
+      message(
+        "Reactome enrichment failed for ",
+        gene_set_name,
+        ": ",
+        conditionMessage(e)
+      )
+
+      NULL
+
+    }
+
+  )
+
+
+  if(
+    !is.null(ereact) &&
+    nrow(
+      as.data.frame(ereact)
+    ) > 0
+  ){
+
+    result_df <-
+      as.data.frame(
+        ereact
+      )
+
+
+    write.xlsx(
+
+      result_df,
+
+      file.path(
+        reactome_dir,
+        paste0(
+          "Reactome_",
+          gene_set_name,
+          ".xlsx"
+        )
+      ),
+
+      overwrite = TRUE
+
+    )
+
+
+    pdf(
+
+      file.path(
+        reactome_dir,
+        paste0(
+          "Reactome_",
+          gene_set_name,
+          "_dotplot.pdf"
+        )
+      ),
+
+      width = 11,
+
+      height = 8
+
+    )
+
+    print(
+      dotplot(
+        ereact,
+        showCategory = 20
+      )
+    )
+
+    dev.off()
+
+  }
+
+
+  return(
+    ereact
+  )
+
+}
+
+
+###############################################################
+# 15. RUN GO ENRICHMENT
+###############################################################
+
+go_results <- lapply(
+
+  names(gene_sets),
+
+  function(name){
+
+    run_GO(
+      gene_sets[[name]],
+      name
+    )
+
+  }
+
+)
+
+names(go_results) <-
+  names(gene_sets)
+
+
+###############################################################
+# 16. RUN KEGG ENRICHMENT
+###############################################################
+
+kegg_results <- lapply(
+
+  names(gene_sets),
+
+  function(name){
+
+    run_KEGG(
+      id_maps[[name]],
+      name
+    )
+
+  }
+
+)
+
+names(kegg_results) <-
+  names(gene_sets)
+
+
+###############################################################
+# 17. RUN REACTOME ENRICHMENT
+###############################################################
+
+reactome_results <- lapply(
+
+  names(gene_sets),
+
+  function(name){
+
+    run_Reactome(
+      id_maps[[name]],
+      name
+    )
+
+  }
+
+)
+
+names(reactome_results) <-
+  names(gene_sets)
+
+
+###############################################################
+# 18. ENRICHMENT SUMMARY
+###############################################################
+
+enrichment_summary <- data.frame(
+
+  Gene_Set =
+    names(gene_sets),
+
+  Input_Genes =
+    sapply(
+      gene_sets,
+      length
+    ),
+
+  Mapped_Entrez =
+    sapply(
+      id_maps,
+      function(x){
+
+        if(
+          is.null(x)
+        ){
+
+          0
+
+        } else {
+
+          nrow(x)
+
+        }
+
+      }
+    ),
+
+  GO_Terms =
+    sapply(
+      go_results,
+      function(x){
+
+        if(
+          is.null(x)
+        ){
+
+          0
+
+        } else {
+
+          nrow(
+            as.data.frame(x)
+          )
+
+        }
+
+      }
+    ),
+
+  KEGG_Pathways =
+    sapply(
+      kegg_results,
+      function(x){
+
+        if(
+          is.null(x)
+        ){
+
+          0
+
+        } else {
+
+          nrow(
+            as.data.frame(x)
+          )
+
+        }
+
+      }
+    ),
+
+  Reactome_Pathways =
+    sapply(
+      reactome_results,
+      function(x){
+
+        if(
+          is.null(x)
+        ){
+
+          0
+
+        } else {
+
+          nrow(
+            as.data.frame(x)
+          )
+
+        }
+
+      }
+    )
+
+)
+
+
+write.xlsx(
+
+  enrichment_summary,
+
+  file.path(
+    output_dir,
+    "Enrichment_Summary.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+###############################################################
+# 19. GSEA — PREPARE RANKED GENE LIST
+###############################################################
+
+# IMPORTANT:
+# GSEA does NOT use only significant DEGs.
+#
+# The complete gene list is ranked using the
+# DESeq2 Wald statistic.
+
+ranked_df <- deg %>%
+
+  filter(
+    !is.na(stat)
+  ) %>%
+
+  arrange(
+    desc(stat)
+  )
+
+
+###############################################################
+# 20. REMOVE DUPLICATE GENE SYMBOLS
+###############################################################
+
+ranked_df <- ranked_df %>%
+
+  filter(
+    !duplicated(
+      Gene
+    )
+  )
+
+
+###############################################################
+# 21. CREATE RANKED STATISTIC
+###############################################################
+
+ranked_stat <-
+
+  ranked_df$stat
+
+names(ranked_stat) <-
+  ranked_df$Gene
+
+
+ranked_stat <-
+  sort(
+    ranked_stat,
+    decreasing = TRUE
+  )
+
+
+###############################################################
+# 22. CONVERT SYMBOLS TO ENTREZ IDs
+###############################################################
+
+ranked_mapping <- bitr(
+
+  names(ranked_stat),
+
+  fromType =
+    "SYMBOL",
+
+  toType =
+    "ENTREZID",
+
+  OrgDb =
+    org.Hs.eg.db
+
+)
+
+
+###############################################################
+# 23. CREATE ENTREZ-RANKED LIST
+###############################################################
+
+ranked_stat_entrez <-
+
+  ranked_stat[
+    ranked_mapping$SYMBOL
+  ]
+
+names(
+  ranked_stat_entrez
+) <-
+  ranked_mapping$ENTREZID
+
+
+ranked_stat_entrez <-
+
+  ranked_stat_entrez[
+    !duplicated(
+      names(
+        ranked_stat_entrez
+      )
+    )
+  ]
+
+
+ranked_stat_entrez <-
+  sort(
+    ranked_stat_entrez,
+    decreasing = TRUE
+  )
+
+
+###############################################################
+# 24. GSEA — GO
+###############################################################
+
+gsea_go <- tryCatch(
+
+  gseGO(
+
+    geneList =
+      ranked_stat,
+
+    OrgDb =
+      org.Hs.eg.db,
+
+    keyType =
+      "SYMBOL",
+
+    ont =
+      "ALL",
+
+    pAdjustMethod =
+      "BH",
+
+    pvalueCutoff =
+      0.05,
+
+    minGSSize =
+      10,
+
+    maxGSSize =
+      500,
+
+    eps =
+      0
+
+  ),
+
+  error = function(e){
+
+    message(
+      "GO GSEA failed: ",
+      conditionMessage(e)
+    )
+
+    NULL
+
+  }
+
+)
+
+
+###############################################################
+# 25. GSEA — KEGG
+###############################################################
+
+gsea_kegg <- tryCatch(
+
+  gseKEGG(
+
+    geneList =
+      ranked_stat_entrez,
+
+    organism =
+      "hsa",
+
+    pAdjustMethod =
+      "BH",
+
+    pvalueCutoff =
+      0.05,
+
+    minGSSize =
+      10,
+
+    maxGSSize =
+      500,
+
+    eps =
+      0
+
+  ),
+
+  error = function(e){
+
+    message(
+      "KEGG GSEA failed: ",
+      conditionMessage(e)
+    )
+
+    NULL
+
+  }
+
+)
+
+
+###############################################################
+# 26. GSEA — REACTOME
+###############################################################
+
+gsea_reactome <- tryCatch(
+
+  gsePathway(
+
+    geneList =
+      ranked_stat_entrez,
+
+    organism =
+      "human",
+
+    pAdjustMethod =
+      "BH",
+
+    pvalueCutoff =
+      0.05,
+
+    minGSSize =
+      10,
+
+    maxGSSize =
+      500,
+
+    eps =
+      0
+
+  ),
+
+  error = function(e){
+
+    message(
+      "Reactome GSEA failed: ",
+      conditionMessage(e)
+    )
+
+    NULL
+
+  }
+
+)
+
+
+###############################################################
+# 27. SAVE GSEA RESULTS
+###############################################################
+
+save_gsea <- function(
+  result,
+  name
+){
+
+  if(
+    is.null(result)
+  ){
+
+    return(
+      NULL
+    )
+
+  }
+
+
+  result_df <-
+    as.data.frame(
+      result
+    )
+
+
+  if(
+    nrow(result_df) == 0
+  ){
+
+    return(
+      NULL
+    )
+
+  }
+
+
+  write.xlsx(
+
+    result_df,
+
+    file.path(
+      gsea_dir,
+      paste0(
+        "GSEA_",
+        name,
+        ".xlsx"
+      )
+    ),
+
+    overwrite = TRUE
+
+  )
+
+
+  pdf(
+
+    file.path(
+      gsea_dir,
+      paste0(
+        "GSEA_",
+        name,
+        "_dotplot.pdf"
+      )
+    ),
+
+    width = 11,
+
+    height = 8
+
+  )
+
+  print(
+    dotplot(
+      result,
+      showCategory = 20
+    )
+  )
+
+  dev.off()
+
+
+  return(
+    nrow(result_df)
+  )
+
+}
+
+
+###############################################################
+# 28. SAVE ALL GSEA RESULTS
+###############################################################
+
+n_gsea_go <-
+  save_gsea(
+    gsea_go,
+    "GO"
+  )
+
+n_gsea_kegg <-
+  save_gsea(
+    gsea_kegg,
+    "KEGG"
+  )
+
+n_gsea_reactome <-
+  save_gsea(
+    gsea_reactome,
+    "Reactome"
+  )
+
+
+###############################################################
+# 29. GSEA SUMMARY
+###############################################################
+
+gsea_summary <- data.frame(
+
+  Database = c(
+    "GO",
+    "KEGG",
+    "Reactome"
+  ),
+
+  Significant_Gene_Sets = c(
+
+    ifelse(
+      is.null(n_gsea_go),
+      0,
+      n_gsea_go
+    ),
+
+    ifelse(
+      is.null(n_gsea_kegg),
+      0,
+      n_gsea_kegg
+    ),
+
+    ifelse(
+      is.null(n_gsea_reactome),
+      0,
+      n_gsea_reactome
+    )
+
+  )
+
+)
+
+
+write.xlsx(
+
+  gsea_summary,
+
+  file.path(
+    gsea_dir,
+    "GSEA_Summary.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+###############################################################
+# 30. FINAL SUMMARY
+###############################################################
+
+cat(
+  "\n============================================\n"
+)
+
+cat(
+  "FUNCTIONAL ENRICHMENT COMPLETE\n"
+)
+
+cat(
+  "============================================\n"
+)
+
+cat(
+  "Significant DEGs:",
+  nrow(deg_sig),
+  "\n"
+)
+
+cat(
+  "Upregulated genes:",
+  length(up_genes),
+  "\n"
+)
+
+cat(
+  "Downregulated genes:",
+  length(down_genes),
+  "\n"
+)
+
+cat(
+  "GSEA ranking: DESeq2 Wald statistic\n"
+)
+
+cat(
+  "GSEA input: complete gene list\n"
+)
+
+cat(
+  "Output folder:",
+  output_dir,
+  "\n"
+)
+
+cat(
+  "============================================\n"
+)
+
+
+###############################################################
+# END OF STEP 8
+###############################################################
