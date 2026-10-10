@@ -1,0 +1,291 @@
+###############################################################
+# RNA-seq Transcriptomics Pipeline
+# Step 4: Post-Batch-Correction QC and UMAP
+###############################################################
+#
+# Purpose:
+# Evaluate sample-level structure after ComBat-seq batch
+# correction and assess whether unwanted batch-associated
+# structure has been reduced.
+#
+# Input:
+# - Batch-corrected RNA-seq count matrix
+# - Sample metadata containing batch information
+#
+# Main steps:
+# 1. Read corrected count matrix
+# 2. Read sample metadata
+# 3. Match and reorder samples
+# 4. Run UMAP on corrected counts
+# 5. Visualize samples by batch
+# 6. Label individual samples
+#
+###############################################################
+
+
+##############################
+# 1. LOAD PACKAGES
+##############################
+
+library(openxlsx)
+library(umap)
+library(ggplot2)
+library(ggrepel)
+
+
+##############################
+# 2. DEFINE INPUT / OUTPUT
+##############################
+
+count_file <- paste0(
+  "results/Batch_Correction/",
+  "batch_corrected_count_matrix.xlsx"
+)
+
+metadata_file <- "data/metadata/batch_metadata.xlsx"
+
+output_dir <- "results/Post_Batch_QC"
+
+dir.create(
+  output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+##############################
+# 3. READ CORRECTED
+#    COUNT MATRIX
+##############################
+
+counts <- read.xlsx(
+  count_file
+)
+
+
+##############################
+# 4. READ SAMPLE METADATA
+##############################
+
+batch <- read.xlsx(
+  metadata_file
+)[,
+  c("Sample_ID", "Batch")
+]
+
+
+##############################
+# 5. SET GENE IDENTIFIERS
+#    AS ROW NAMES
+##############################
+
+rownames(counts) <- counts$Ensid
+
+counts <- counts[
+  ,
+  !names(counts) %in% "Ensid",
+  drop = FALSE
+]
+
+
+##############################
+# 6. CONVERT COUNTS TO NUMERIC
+##############################
+
+counts <- as.data.frame(
+  counts,
+  check.names = FALSE
+)
+
+counts[] <- lapply(
+  counts,
+  as.numeric
+)
+
+
+##############################
+# 7. MATCH SAMPLES
+#    BETWEEN COUNT MATRIX
+#    AND METADATA
+##############################
+
+sample_cols <- match(
+  batch$Sample_ID,
+  colnames(counts)
+)
+
+
+##############################
+# 8. CHECK FOR MISSING SAMPLES
+##############################
+
+if(any(is.na(sample_cols))){
+
+  cat(
+    "\nSamples present in metadata ",
+    "but missing from corrected count matrix:\n"
+  )
+
+  print(
+    batch$Sample_ID[
+      is.na(sample_cols)
+    ]
+  )
+
+  stop(
+    "Sample matching failed."
+  )
+
+}
+
+
+##############################
+# 9. REORDER COUNT MATRIX
+#    TO MATCH METADATA
+##############################
+
+counts <- counts[
+  ,
+  sample_cols,
+  drop = FALSE
+]
+
+
+##############################
+# 10. CONVERT TO MATRIX
+##############################
+
+counts <- as.matrix(
+  counts
+)
+
+
+##############################
+# 11. RUN UMAP
+#     ON CORRECTED COUNTS
+##############################
+
+set.seed(123)
+
+um <- umap(
+  t(counts)
+)
+
+
+##############################
+# 12. CREATE PLOTTING DATA
+##############################
+
+plot_df <- data.frame(
+
+  UMAP1 = um$layout[, 1],
+
+  UMAP2 = um$layout[, 2],
+
+  Sample = batch$Sample_ID,
+
+  Batch = batch$Batch,
+
+  stringsAsFactors = FALSE
+
+)
+
+
+##############################
+# 13. GENERATE UMAP PLOT
+##############################
+
+p <- ggplot(
+  plot_df,
+  aes(
+    x = UMAP1,
+    y = UMAP2,
+    colour = Batch
+  )
+) +
+
+  geom_point(
+    size = 4
+  ) +
+
+  geom_text_repel(
+    aes(
+      label = Sample
+    ),
+    size = 3,
+    max.overlaps = Inf,
+    box.padding = 0.4,
+    point.padding = 0.3,
+    segment.size = 0.3
+  ) +
+
+  labs(
+    title = "Post-Batch-Correction UMAP",
+    subtitle = "ComBat-seq corrected RNA-seq counts",
+    x = "UMAP 1",
+    y = "UMAP 2",
+    colour = "Batch"
+  ) +
+
+  theme_classic(
+    base_size = 14
+  )
+
+
+##############################
+# 14. SAVE UMAP FIGURE
+##############################
+
+ggsave(
+  filename = file.path(
+    output_dir,
+    "UMAP_batch_corrected_counts.png"
+  ),
+  plot = p,
+  width = 12,
+  height = 10,
+  dpi = 600
+)
+
+
+##############################
+# 15. PRINT SUMMARY
+##############################
+
+cat(
+  "\n========================================\n"
+)
+
+cat(
+  "Post-batch-correction UMAP completed.\n"
+)
+
+cat(
+  "Samples plotted:",
+  nrow(plot_df),
+  "\n"
+)
+
+cat(
+  "Batches represented:",
+  length(unique(plot_df$Batch)),
+  "\n"
+)
+
+cat(
+  "Output:",
+  file.path(
+    output_dir,
+    "UMAP_batch_corrected_counts.png"
+  ),
+  "\n"
+)
+
+cat(
+  "========================================\n"
+)
+
+
+###############################################################
+# END OF STEP 4
+###############################################################
