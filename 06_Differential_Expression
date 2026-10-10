@@ -1,0 +1,1150 @@
+###############################################################
+# RNA-seq Transcriptomics Pipeline
+# Step 6: DESeq2 Differential Expression Analysis
+###############################################################
+#
+# Purpose:
+# Identify differentially expressed genes between two biological
+# groups using DESeq2.
+#
+# Main steps:
+# 1. Read filtered count matrix and sample metadata
+# 2. Match samples between counts and metadata
+# 3. Set the biological reference group
+# 4. Create DESeq2 dataset
+# 5. Estimate size factors
+# 6. Generate normalized counts
+# 7. Filter low-expression genes
+# 8. Perform Wald-test differential expression
+# 9. Calculate Cook's distance diagnostics
+# 10. Perform LFC shrinkage using ashr
+# 11. Apply post-hoc DEG thresholds
+# 12. Export results and QC summaries
+#
+###############################################################
+
+
+##############################
+# 1. LOAD PACKAGES
+##############################
+
+library(DESeq2)
+library(openxlsx)
+library(ashr)
+
+
+##############################
+# 2. DEFINE INPUT / OUTPUT
+##############################
+
+count_file <- paste0(
+  "results/Annotation_and_Filtering/",
+  "final_protein_coding_count_matrix.xlsx"
+)
+
+metadata_file <- "data/metadata/DE_metadata.xlsx"
+
+output_dir <- "results/Differential_Expression"
+
+dir.create(
+  output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  file.path(output_dir, "01_Matched_Samples"),
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  file.path(output_dir, "02_DESeq_Normalization"),
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  file.path(output_dir, "03_Wald_Test"),
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  file.path(output_dir, "04_Cooks_Distance"),
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  file.path(output_dir, "05_Significant_DEGs"),
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+dir.create(
+  file.path(output_dir, "06_Summary"),
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+##############################
+# 3. USER-DEFINED COMPARISON
+##############################
+
+# Replace these with the biological groups in your
+# own authorized dataset.
+
+REFERENCE_GROUP <- "Group_A"
+
+COMPARISON_GROUP <- "Group_B"
+
+NORMALIZED_COUNT_SUM_CUTOFF <- 10
+
+
+##############################
+# 4. READ COUNT MATRIX
+##############################
+
+count <- read.xlsx(
+  count_file
+)
+
+
+##############################
+# 5. IDENTIFY SAMPLE COLUMNS
+##############################
+
+annotation_columns <- c(
+  "ensembl_gene_id",
+  "hgnc_symbol",
+  "gene_biotype",
+  "description"
+)
+
+sample_columns <- setdiff(
+  colnames(count),
+  annotation_columns
+)
+
+
+##############################
+# 6. CREATE COUNT MATRIX
+##############################
+
+count_matrix <- as.matrix(
+  count[, sample_columns, drop = FALSE]
+)
+
+storage.mode(count_matrix) <- "integer"
+
+
+##############################
+# 7. USE GENE SYMBOLS AS
+#    ROW NAMES
+##############################
+
+rownames(count_matrix) <- make.unique(
+  count$hgnc_symbol
+)
+
+
+##############################
+# 8. READ SAMPLE METADATA
+##############################
+
+sample_info <- read.xlsx(
+  metadata_file
+)
+
+
+##############################
+# 9. CHECK REQUIRED METADATA
+##############################
+
+required_columns <- c(
+  "Sample_ID",
+  "Condition"
+)
+
+missing_columns <- setdiff(
+  required_columns,
+  colnames(sample_info)
+)
+
+if(length(missing_columns) > 0){
+
+  stop(
+    paste(
+      "Missing metadata columns:",
+      paste(
+        missing_columns,
+        collapse = ", "
+      )
+    )
+  )
+
+}
+
+
+##############################
+# 10. KEEP REQUIRED METADATA
+##############################
+
+sample_info <- sample_info[
+  ,
+  required_columns,
+  drop = FALSE
+]
+
+
+##############################
+# 11. MATCH SAMPLES
+##############################
+
+sample_match <- match(
+  sample_info$Sample_ID,
+  colnames(count_matrix)
+)
+
+
+##############################
+# 12. CHECK FOR MISSING
+#     SAMPLES
+##############################
+
+if(any(is.na(sample_match))){
+
+  cat(
+    "\nSamples present in metadata but missing ",
+    "from the count matrix:\n"
+  )
+
+  print(
+    sample_info$Sample_ID[
+      is.na(sample_match)
+    ]
+  )
+
+  stop(
+    "Sample matching failed."
+  )
+
+}
+
+
+##############################
+# 13. REORDER COUNT MATRIX
+#     TO MATCH METADATA
+##############################
+
+count_matrix <- count_matrix[
+  ,
+  sample_match,
+  drop = FALSE
+]
+
+
+##############################
+# 14. VERIFY SAMPLE ORDER
+##############################
+
+if(
+  !all(
+    colnames(count_matrix) ==
+      sample_info$Sample_ID
+  )
+){
+
+  stop(
+    "Sample order does not match between metadata and count matrix."
+  )
+
+}
+
+
+##############################
+# 15. SAVE MATCHING TABLE
+##############################
+
+matching_table <- data.frame(
+
+  Sample_ID = sample_info$Sample_ID,
+
+  Condition = sample_info$Condition,
+
+  stringsAsFactors = FALSE
+
+)
+
+write.xlsx(
+
+  matching_table,
+
+  file.path(
+    output_dir,
+    "01_Matched_Samples",
+    "Sample_Matching.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 16. SET CONDITION FACTOR
+##############################
+
+sample_info$Condition <- factor(
+  sample_info$Condition
+)
+
+
+##############################
+# 17. CHECK BIOLOGICAL GROUPS
+##############################
+
+if(
+  !REFERENCE_GROUP %in%
+    levels(sample_info$Condition)
+){
+
+  stop(
+    paste(
+      "Reference group not found:",
+      REFERENCE_GROUP
+    )
+  )
+
+}
+
+if(
+  !COMPARISON_GROUP %in%
+    levels(sample_info$Condition)
+){
+
+  stop(
+    paste(
+      "Comparison group not found:",
+      COMPARISON_GROUP
+    )
+  )
+
+}
+
+
+##############################
+# 18. SET REFERENCE LEVEL
+##############################
+
+sample_info$Condition <- relevel(
+
+  sample_info$Condition,
+
+  ref = REFERENCE_GROUP
+
+)
+
+
+##############################
+# 19. CREATE DESeq2 DATASET
+##############################
+
+dds <- DESeqDataSetFromMatrix(
+
+  countData = count_matrix,
+
+  colData = data.frame(
+    row.names = sample_info$Sample_ID,
+    Condition = sample_info$Condition
+  ),
+
+  design = ~ Condition
+
+)
+
+
+##############################
+# 20. ESTIMATE SIZE FACTORS
+##############################
+
+dds <- estimateSizeFactors(
+  dds
+)
+
+
+##############################
+# 21. EXTRACT SIZE FACTORS
+##############################
+
+size_factor_table <- data.frame(
+
+  Sample = names(
+    sizeFactors(dds)
+  ),
+
+  SizeFactor = as.numeric(
+    sizeFactors(dds)
+  )
+
+)
+
+
+##############################
+# 22. GENERATE NORMALIZED
+#     COUNTS
+##############################
+
+normalized_counts <- counts(
+
+  dds,
+
+  normalized = TRUE
+
+)
+
+
+##############################
+# 23. SAVE SIZE FACTORS
+##############################
+
+write.xlsx(
+
+  size_factor_table,
+
+  file.path(
+    output_dir,
+    "02_DESeq_Normalization",
+    "Size_Factors.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 24. SAVE NORMALIZED COUNTS
+##############################
+
+normalized_df <- data.frame(
+
+  Gene = rownames(
+    normalized_counts
+  ),
+
+  normalized_counts,
+
+  check.names = FALSE
+
+)
+
+write.xlsx(
+
+  normalized_df,
+
+  file.path(
+    output_dir,
+    "02_DESeq_Normalization",
+    "Normalized_Counts.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 25. NORMALIZATION QC
+##############################
+
+normalization_qc <- data.frame(
+
+  Sample = colnames(
+    count_matrix
+  ),
+
+  Library_Size_Before =
+    colSums(count_matrix),
+
+  SizeFactor =
+    sizeFactors(dds),
+
+  Library_Size_After =
+    colSums(normalized_counts)
+
+)
+
+
+write.xlsx(
+
+  normalization_qc,
+
+  file.path(
+    output_dir,
+    "02_DESeq_Normalization",
+    "Normalization_QC.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 26. LOW-EXPRESSION FILTERING
+##############################
+
+# Retain genes with a total normalized
+# count of at least 10 across all samples.
+
+keep <- rowSums(
+  counts(
+    dds,
+    normalized = TRUE
+  )
+) >= NORMALIZED_COUNT_SUM_CUTOFF
+
+
+##############################
+# 27. APPLY FILTER
+##############################
+
+dds <- dds[
+  keep,
+  ]
+
+
+##############################
+# 28. FILTERING SUMMARY
+##############################
+
+filtering_summary <- data.frame(
+
+  Metric = c(
+    "Genes before filtering",
+    "Genes after filtering",
+    "Genes removed",
+    "Normalized count-sum cutoff"
+  ),
+
+  Value = c(
+    length(keep),
+    sum(keep),
+    sum(!keep),
+    NORMALIZED_COUNT_SUM_CUTOFF
+  )
+
+)
+
+
+write.xlsx(
+
+  filtering_summary,
+
+  file.path(
+    output_dir,
+    "02_DESeq_Normalization",
+    "Filtering_Summary.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 29. RUN DESeq2
+##############################
+
+dds <- DESeq(
+
+  dds,
+
+  test = "Wald",
+
+  fitType = "parametric",
+
+  minReplicatesForReplace = Inf
+
+)
+
+
+##############################
+# 30. EXTRACT WALD TEST
+#     RESULTS
+##############################
+
+res_all <- results(
+
+  dds,
+
+  contrast = c(
+    "Condition",
+    COMPARISON_GROUP,
+    REFERENCE_GROUP
+  ),
+
+  cooksCutoff = FALSE
+
+)
+
+
+##############################
+# 31. CONVERT RESULTS
+#     TO DATA FRAME
+##############################
+
+results_table <- as.data.frame(
+  res_all
+)
+
+results_table$Gene <- rownames(
+  results_table
+)
+
+
+##############################
+# 32. REORDER RESULT COLUMNS
+##############################
+
+results_table <- results_table[
+  ,
+  c(
+    "Gene",
+    setdiff(
+      colnames(results_table),
+      "Gene"
+    )
+  )
+]
+
+
+##############################
+# 33. ADD GENE ANNOTATION
+##############################
+
+annotation <- count[
+  ,
+  annotation_columns,
+  drop = FALSE
+]
+
+annotation$Gene <- make.unique(
+  annotation$hgnc_symbol
+)
+
+annotation <- annotation[
+  ,
+  c(
+    "Gene",
+    "ensembl_gene_id",
+    "hgnc_symbol",
+    "gene_biotype",
+    "description"
+  )
+]
+
+
+##############################
+# 34. MERGE ANNOTATION
+#     WITH DE RESULTS
+##############################
+
+results_table <- merge(
+
+  annotation,
+
+  results_table,
+
+  by = "Gene",
+
+  all.y = TRUE,
+
+  sort = FALSE
+
+)
+
+
+##############################
+# 35. COOK'S DISTANCE
+##############################
+
+cooks <- assays(dds)[[
+  "cooks"
+]]
+
+
+##############################
+# 36. CALCULATE COOK'S
+#     DISTANCE CUTOFF
+##############################
+
+m <- ncol(dds)
+
+p <- length(
+  resultsNames(dds)
+)
+
+
+default_cooks_cutoff <- qf(
+
+  0.99,
+
+  p,
+
+  m - p
+
+)
+
+
+##############################
+# 37. SUMMARIZE COOK'S
+#     DISTANCE
+##############################
+
+cooks_table <- data.frame(
+
+  Gene = rownames(dds),
+
+  Max_Cooks =
+    apply(
+      cooks,
+      1,
+      max
+    ),
+
+  Num_Outlier_Samples =
+    rowSums(
+      cooks >
+        default_cooks_cutoff
+    )
+
+)
+
+
+##############################
+# 38. ADD COOK'S INFORMATION
+#     TO RESULTS
+##############################
+
+results_table$Max_Cooks <-
+
+  cooks_table$Max_Cooks[
+    match(
+      results_table$Gene,
+      cooks_table$Gene
+    )
+  ]
+
+
+results_table$Num_Outlier_Samples <-
+
+  cooks_table$Num_Outlier_Samples[
+    match(
+      results_table$Gene,
+      cooks_table$Gene
+    )
+  ]
+
+
+##############################
+# 39. SAVE COOK'S TABLE
+##############################
+
+write.xlsx(
+
+  cooks_table,
+
+  file.path(
+    output_dir,
+    "04_Cooks_Distance",
+    "Cooks_Distance_All_Genes.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 40. SAVE COOK'S
+#     OUTLIER GENES
+##############################
+
+cooks_outliers <- cooks_table[
+  cooks_table$Num_Outlier_Samples > 0,
+  ,
+  drop = FALSE
+]
+
+
+write.xlsx(
+
+  cooks_outliers,
+
+  file.path(
+    output_dir,
+    "04_Cooks_Distance",
+    "Cooks_Outlier_Genes.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 41. SAVE COOK'S SUMMARY
+##############################
+
+cooks_summary <- data.frame(
+
+  Metric = c(
+    "Default Cook's cutoff",
+    "Genes with outlier samples"
+  ),
+
+  Value = c(
+    default_cooks_cutoff,
+    nrow(cooks_outliers)
+  )
+
+)
+
+
+write.xlsx(
+
+  cooks_summary,
+
+  file.path(
+    output_dir,
+    "04_Cooks_Distance",
+    "Cooks_Summary.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 42. LFC SHRINKAGE USING ASHR
+##############################
+
+coef_name <- resultsNames(
+  dds
+)[2]
+
+
+res_ashr <- lfcShrink(
+
+  dds,
+
+  coef = coef_name,
+
+  res = res_all,
+
+  type = "ashr"
+
+)
+
+
+##############################
+# 43. ADD SHRUNK LFC
+##############################
+
+results_table$LFC_Shrink_ashr <-
+
+  res_ashr$log2FoldChange
+
+
+##############################
+# 44. SAVE COMPLETE
+#     WALD TEST RESULTS
+##############################
+
+write.xlsx(
+
+  results_table,
+
+  file.path(
+    output_dir,
+    "03_Wald_Test",
+    "Wald_All_Genes.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 45. DEG EXTRACTION
+##############################
+
+# All tested genes
+deg_all <- results_table
+
+
+# Adjusted p-value < 0.10
+deg_padj01 <- subset(
+
+  results_table,
+
+  !is.na(padj) &
+  padj < 0.10
+
+)
+
+
+# padj < 0.05 and
+# absolute log2FC >= log2(1.5)
+deg_fc15 <- subset(
+
+  results_table,
+
+  !is.na(padj) &
+  padj < 0.05 &
+  abs(log2FoldChange) >= log2(1.5)
+
+)
+
+
+# padj < 0.05 and
+# absolute log2FC >= 1
+deg_fc1 <- subset(
+
+  results_table,
+
+  !is.na(padj) &
+  padj < 0.05 &
+  abs(log2FoldChange) >= 1
+
+)
+
+
+# padj < 0.05 and
+# absolute log2FC >= log2(2)
+deg_fc2 <- subset(
+
+  results_table,
+
+  !is.na(padj) &
+  padj < 0.05 &
+  abs(log2FoldChange) >= log2(2)
+
+)
+
+
+##############################
+# 46. SAVE DEG TABLES
+##############################
+
+write.xlsx(
+
+  deg_all,
+
+  file.path(
+    output_dir,
+    "05_Significant_DEGs",
+    "01_All_Genes_No_Cutoff.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+write.xlsx(
+
+  deg_padj01,
+
+  file.path(
+    output_dir,
+    "05_Significant_DEGs",
+    "02_padj_0.10.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+write.xlsx(
+
+  deg_fc15,
+
+  file.path(
+    output_dir,
+    "05_Significant_DEGs",
+    "03_padj_0.05_log2FC_1.5.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+write.xlsx(
+
+  deg_fc1,
+
+  file.path(
+    output_dir,
+    "05_Significant_DEGs",
+    "04_padj_0.05_log2FC_1.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+write.xlsx(
+
+  deg_fc2,
+
+  file.path(
+    output_dir,
+    "05_Significant_DEGs",
+    "05_padj_0.05_log2FC_2.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 47. DEG SUMMARY
+##############################
+
+summary_table <- data.frame(
+
+  Metric = c(
+
+    "Total genes tested",
+
+    "padj < 0.10",
+
+    "padj < 0.05 & |log2FC| >= log2(1.5)",
+
+    "padj < 0.05 & |log2FC| >= 1",
+
+    "padj < 0.05 & |log2FC| >= log2(2)"
+
+  ),
+
+  Count = c(
+
+    nrow(results_table),
+
+    nrow(deg_padj01),
+
+    nrow(deg_fc15),
+
+    nrow(deg_fc1),
+
+    nrow(deg_fc2)
+
+  )
+
+)
+
+
+write.xlsx(
+
+  summary_table,
+
+  file.path(
+    output_dir,
+    "06_Summary",
+    "DEG_Summary.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 48. FINAL SUMMARY
+##############################
+
+cat(
+  "\n========================================\n"
+)
+
+cat(
+  "DESeq2 DIFFERENTIAL EXPRESSION COMPLETE\n"
+)
+
+cat(
+  "========================================\n"
+)
+
+cat(
+  "Reference group:",
+  REFERENCE_GROUP,
+  "\n"
+)
+
+cat(
+  "Comparison group:",
+  COMPARISON_GROUP,
+  "\n"
+)
+
+cat(
+  "Genes tested:",
+  nrow(results_table),
+  "\n"
+)
+
+cat(
+  "padj < 0.10:",
+  nrow(deg_padj01),
+  "\n"
+)
+
+cat(
+  "padj < 0.05 & |log2FC| >= log2(1.5):",
+  nrow(deg_fc15),
+  "\n"
+)
+
+cat(
+  "padj < 0.05 & |log2FC| >= 1:",
+  nrow(deg_fc1),
+  "\n"
+)
+
+cat(
+  "padj < 0.05 & |log2FC| >= log2(2):",
+  nrow(deg_fc2),
+  "\n"
+)
+
+cat(
+  "\nCook's distance cutoff:",
+  default_cooks_cutoff,
+  "\n"
+)
+
+cat(
+  "Genes with Cook's outliers:",
+  nrow(cooks_outliers),
+  "\n"
+)
+
+cat(
+  "\n========================================\n"
+)
+
+
+###############################################################
+# END OF STEP 6
+###############################################################
