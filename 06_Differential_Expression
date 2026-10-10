@@ -1145,6 +1145,92 @@ cat(
 )
 
 
+##############################
+# 49. VARIANCE STABILIZING
+#     TRANSFORMATION
+##############################
+
+# VST is used for downstream visualization
+# such as PCA, UMAP and heatmaps.
+
+vsd <- vst(
+  dds,
+  blind = FALSE
+)
+
+vst_matrix <- assay(
+  vsd
+)
+
+
+##############################
+# 50. ADD GENE ANNOTATION
+##############################
+
+vst_df <- data.frame(
+
+  Gene = rownames(vst_matrix),
+
+  vst_matrix,
+
+  check.names = FALSE
+
+)
+
+
+##############################
+# 51. SAVE VST MATRIX
+##############################
+
+dir.create(
+
+  file.path(
+    output_dir,
+    "07_VST"
+  ),
+
+  recursive = TRUE,
+
+  showWarnings = FALSE
+
+)
+
+
+write.xlsx(
+
+  vst_df,
+
+  file.path(
+    output_dir,
+    "07_VST",
+    "VST_Expression_Matrix.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 52. VST SUMMARY
+##############################
+
+cat(
+  "\nVST transformation completed.\n"
+)
+
+cat(
+  "Genes:",
+  nrow(vst_matrix),
+  "\n"
+)
+
+cat(
+  "Samples:",
+  ncol(vst_matrix),
+  "\n"
+)
+
 ###############################################################
 # END OF STEP 6
 ###############################################################
