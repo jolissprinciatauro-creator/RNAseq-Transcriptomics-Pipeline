@@ -1,0 +1,455 @@
+###############################################################
+# RNA-seq Transcriptomics Pipeline
+# Step 5: Gene Annotation and Filtering
+###############################################################
+#
+# Purpose:
+# Annotate batch-corrected RNA-seq counts and prepare a
+# non-redundant protein-coding gene matrix for downstream
+# differential expression analysis.
+#
+# Main steps:
+# 1. Read batch-corrected count matrix
+# 2. Standardize Ensembl gene identifiers
+# 3. Retrieve gene annotation using Ensembl BioMart
+# 4. Add HGNC symbol, gene biotype and description
+# 5. Retain protein-coding genes
+# 6. Remove genes without HGNC symbols
+# 7. Resolve duplicate gene symbols
+# 8. Retain the highest-variance representation
+#
+# Output:
+# Final annotated, filtered and non-redundant count matrix
+#
+###############################################################
+
+
+##############################
+# 1. LOAD PACKAGES
+##############################
+
+library(biomaRt)
+library(openxlsx)
+
+
+##############################
+# 2. DEFINE INPUT / OUTPUT
+##############################
+
+count_file <- paste0(
+  "results/Batch_Correction/",
+  "batch_corrected_count_matrix.xlsx"
+)
+
+output_dir <- "results/Annotation_and_Filtering"
+
+dir.create(
+  output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+##############################
+# 3. READ BATCH-CORRECTED
+#    COUNT MATRIX
+##############################
+
+count <- read.xlsx(
+  count_file
+)
+
+cat(
+  "\nInput count matrix dimensions:\n"
+)
+
+print(
+  dim(count)
+)
+
+
+##############################
+# 4. STANDARDIZE ENSEMBL IDs
+##############################
+
+# Remove version suffixes such as:
+# ENSG00000123456.1
+#
+# → ENSG00000123456
+
+count[, 1] <- sub(
+  "\\..*$",
+  "",
+  count[, 1]
+)
+
+colnames(count)[1] <- "ensembl_gene_id"
+
+
+##############################
+# 5. CONNECT TO ENSEMBL
+#    BIOMART
+##############################
+
+mart <- useEnsembl(
+  biomart = "genes",
+  dataset = "hsapiens_gene_ensembl",
+  mirror = "useast"
+)
+
+
+##############################
+# 6. RETRIEVE GENE ANNOTATION
+##############################
+
+annotation <- getBM(
+
+  attributes = c(
+    "ensembl_gene_id",
+    "hgnc_symbol",
+    "gene_biotype",
+    "description"
+  ),
+
+  filters = "ensembl_gene_id",
+
+  values = unique(
+    count$ensembl_gene_id
+  ),
+
+  mart = mart
+
+)
+
+
+##############################
+# 7. REMOVE DUPLICATE
+#    ENSEMBL ANNOTATIONS
+##############################
+
+annotation <- annotation[
+  !duplicated(
+    annotation$ensembl_gene_id
+  ),
+]
+
+
+##############################
+# 8. MERGE ANNOTATION WITH
+#    COUNT MATRIX
+##############################
+
+annotated_counts <- merge(
+
+  annotation,
+
+  count,
+
+  by = "ensembl_gene_id",
+
+  all.y = TRUE,
+
+  sort = FALSE
+
+)
+
+
+##############################
+# 9. RESTORE ORIGINAL
+#    GENE ORDER
+##############################
+
+annotated_counts <- annotated_counts[
+  match(
+    count$ensembl_gene_id,
+    annotated_counts$ensembl_gene_id
+  ),
+]
+
+
+##############################
+# 10. REORDER ANNOTATION
+#     COLUMNS
+##############################
+
+annotation_columns <- c(
+  "ensembl_gene_id",
+  "hgnc_symbol",
+  "gene_biotype",
+  "description"
+)
+
+annotated_counts <- annotated_counts[
+  ,
+  c(
+    annotation_columns,
+    setdiff(
+      names(annotated_counts),
+      annotation_columns
+    )
+  )
+]
+
+
+##############################
+# 11. ANNOTATION SUMMARY
+##############################
+
+cat(
+  "\n========================================\n"
+)
+
+cat(
+  "GENE ANNOTATION SUMMARY\n"
+)
+
+cat(
+  "========================================\n"
+)
+
+cat(
+  "Genes in input matrix:",
+  nrow(count),
+  "\n"
+)
+
+cat(
+  "Genes with HGNC symbols:",
+  sum(
+    !is.na(
+      annotated_counts$hgnc_symbol
+    ) &
+    annotated_counts$hgnc_symbol != ""
+  ),
+  "\n"
+)
+
+cat(
+  "Missing HGNC symbols:",
+  sum(
+    is.na(
+      annotated_counts$hgnc_symbol
+    ) |
+    annotated_counts$hgnc_symbol == ""
+  ),
+  "\n"
+)
+
+
+##############################
+# 12. KEEP PROTEIN-CODING
+#     GENES
+##############################
+
+protein_coding <- annotated_counts[
+  annotated_counts$gene_biotype ==
+    "protein_coding",
+  ,
+  drop = FALSE
+]
+
+
+##############################
+# 13. REMOVE MISSING
+#     HGNC SYMBOLS
+##############################
+
+protein_coding <- protein_coding[
+  !is.na(
+    protein_coding$hgnc_symbol
+  ) &
+  protein_coding$hgnc_symbol != "",
+  ,
+  drop = FALSE
+]
+
+
+##############################
+# 14. IDENTIFY EXPRESSION
+#     COLUMNS
+##############################
+
+expression_columns <- setdiff(
+  colnames(protein_coding),
+  annotation_columns
+)
+
+
+##############################
+# 15. CONVERT EXPRESSION
+#     VALUES TO NUMERIC
+##############################
+
+protein_coding[
+  expression_columns
+] <- lapply(
+  protein_coding[
+    expression_columns
+  ],
+  as.numeric
+)
+
+
+##############################
+# 16. CALCULATE GENE
+#     VARIANCE
+##############################
+
+protein_coding$Variance <- apply(
+
+  protein_coding[
+    expression_columns
+  ],
+
+  1,
+
+  var,
+
+  na.rm = TRUE
+
+)
+
+
+##############################
+# 17. ORDER GENES BY
+#     SYMBOL AND VARIANCE
+##############################
+
+protein_coding <- protein_coding[
+  order(
+    protein_coding$hgnc_symbol,
+    -protein_coding$Variance
+  ),
+]
+
+
+##############################
+# 18. RETAIN ONE ROW PER
+#     HGNC SYMBOL
+##############################
+
+final_counts <- protein_coding[
+  !duplicated(
+    protein_coding$hgnc_symbol
+  ),
+]
+
+
+##############################
+# 19. REMOVE TEMPORARY
+#     VARIANCE COLUMN
+##############################
+
+final_counts$Variance <- NULL
+
+
+##############################
+# 20. SAVE ANNOTATED MATRIX
+##############################
+
+write.xlsx(
+
+  annotated_counts,
+
+  file.path(
+    output_dir,
+    "annotated_count_matrix.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 21. SAVE FINAL MATRIX
+##############################
+
+write.xlsx(
+
+  final_counts,
+
+  file.path(
+    output_dir,
+    "final_protein_coding_count_matrix.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+##############################
+# 22. FINAL SUMMARY
+##############################
+
+cat(
+  "\n========================================\n"
+)
+
+cat(
+  "GENE ANNOTATION AND FILTERING COMPLETED\n"
+)
+
+cat(
+  "========================================\n"
+)
+
+cat(
+  "Input genes:",
+  nrow(count),
+  "\n"
+)
+
+cat(
+  "Annotated genes:",
+  nrow(annotated_counts),
+  "\n"
+)
+
+cat(
+  "Protein-coding genes:",
+  sum(
+    annotated_counts$gene_biotype ==
+      "protein_coding",
+    na.rm = TRUE
+  ),
+  "\n"
+)
+
+cat(
+  "Final genes after filtering:",
+  nrow(final_counts),
+  "\n"
+)
+
+cat(
+  "Duplicate gene symbols removed:",
+  sum(
+    duplicated(
+      protein_coding$hgnc_symbol
+    )
+  ),
+  "\n"
+)
+
+cat(
+  "\nOutput files:\n"
+)
+
+cat(
+  "1. annotated_count_matrix.xlsx\n"
+)
+
+cat(
+  "2. final_protein_coding_count_matrix.xlsx\n"
+)
+
+cat(
+  "========================================\n"
+)
+
+
+###############################################################
+# END OF STEP 5
+###############################################################
