@@ -1,0 +1,821 @@
+###############################################################
+# RNA-seq Transcriptomics Pipeline
+# Step 7: Visualization
+#
+# Includes:
+#   1. PCA
+#   2. UMAP
+#   3. Volcano plot
+#   4. Differential-expression heatmap
+###############################################################
+
+
+##############################
+# 1. LOAD PACKAGES
+##############################
+
+library(openxlsx)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(umap)
+library(dplyr)
+
+
+##############################
+# 2. DEFINE INPUT / OUTPUT
+##############################
+
+vst_file <- paste0(
+  "results/Differential_Expression/",
+  "07_VST/VST_Expression_Matrix.xlsx"
+)
+
+deg_file <- paste0(
+  "results/Differential_Expression/",
+  "03_Wald_Test/Wald_All_Genes.xlsx"
+)
+
+metadata_file <- "data/metadata/DE_metadata.xlsx"
+
+output_dir <- "results/Visualization"
+
+dir.create(
+  output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+
+##############################
+# 3. VISUALIZATION PARAMETERS
+##############################
+
+PADJ_CUTOFF <- 0.05
+
+LOG2FC_CUTOFF <- 1.2
+
+TOP_N_HEATMAP <- 50
+
+TOP_N_LABELS <- 10
+
+
+##############################
+# 4. READ VST MATRIX
+##############################
+
+vst_df <- read.xlsx(
+  vst_file
+)
+
+
+##############################
+# 5. PREPARE VST MATRIX
+##############################
+
+gene_ids <- vst_df$Gene
+
+vst_matrix <- as.matrix(
+  vst_df[
+    ,
+    setdiff(
+      colnames(vst_df),
+      "Gene"
+    ),
+    drop = FALSE
+  ]
+)
+
+storage.mode(vst_matrix) <- "numeric"
+
+rownames(vst_matrix) <- make.unique(
+  gene_ids
+)
+
+
+##############################
+# 6. READ METADATA
+##############################
+
+metadata <- read.xlsx(
+  metadata_file
+)
+
+
+##############################
+# 7. CHECK METADATA COLUMNS
+##############################
+
+required_metadata <- c(
+  "Sample_ID",
+  "Condition"
+)
+
+missing_metadata <- setdiff(
+  required_metadata,
+  colnames(metadata)
+)
+
+if(length(missing_metadata) > 0){
+
+  stop(
+    paste(
+      "Missing metadata columns:",
+      paste(
+        missing_metadata,
+        collapse = ", "
+      )
+    )
+  )
+
+}
+
+
+##############################
+# 8. MATCH SAMPLE ORDER
+##############################
+
+sample_order <- match(
+  colnames(vst_matrix),
+  metadata$Sample_ID
+)
+
+if(any(is.na(sample_order))){
+
+  stop(
+    "Some VST samples are missing from metadata."
+  )
+
+}
+
+metadata <- metadata[
+  sample_order,
+  ,
+  drop = FALSE
+]
+
+
+##############################
+# 9. VERIFY SAMPLE ORDER
+##############################
+
+if(
+  !all(
+    colnames(vst_matrix) ==
+      metadata$Sample_ID
+  )
+){
+
+  stop(
+    "Sample order does not match."
+  )
+
+}
+
+
+###############################################################
+# PART A — PCA
+###############################################################
+
+##############################
+# 10. RUN PCA
+##############################
+
+pca <- prcomp(
+  t(vst_matrix),
+  scale. = FALSE
+)
+
+
+##############################
+# 11. CALCULATE PCA VARIANCE
+##############################
+
+percent_variance <-
+
+  100 *
+  pca$sdev^2 /
+  sum(pca$sdev^2)
+
+
+##############################
+# 12. CREATE PCA DATA FRAME
+##############################
+
+pca_df <- data.frame(
+
+  Sample = rownames(
+    pca$x
+  ),
+
+  PC1 = pca$x[, 1],
+
+  PC2 = pca$x[, 2],
+
+  Condition = metadata$Condition
+
+)
+
+
+##############################
+# 13. PCA PLOT
+##############################
+
+p_pca <- ggplot(
+
+  pca_df,
+
+  aes(
+    x = PC1,
+    y = PC2,
+    colour = Condition
+  )
+
+) +
+
+  geom_point(
+    size = 4
+  ) +
+
+  geom_text_repel(
+    aes(
+      label = Sample
+    ),
+    size = 3,
+    max.overlaps = Inf
+  ) +
+
+  labs(
+
+    title = "PCA of VST-Transformed Expression",
+
+    x = paste0(
+      "PC1 (",
+      round(
+        percent_variance[1],
+        1
+      ),
+      "%)"
+    ),
+
+    y = paste0(
+      "PC2 (",
+      round(
+        percent_variance[2],
+        1
+      ),
+      "%)"
+    ),
+
+    colour = "Condition"
+
+  ) +
+
+  theme_classic(
+    base_size = 14
+  )
+
+
+##############################
+# 14. SAVE PCA
+##############################
+
+ggsave(
+
+  file.path(
+    output_dir,
+    "PCA_VST.png"
+  ),
+
+  p_pca,
+
+  width = 10,
+
+  height = 8,
+
+  dpi = 600
+
+)
+
+
+###############################################################
+# PART B — UMAP
+###############################################################
+
+##############################
+# 15. RUN UMAP
+##############################
+
+set.seed(123)
+
+um <- umap(
+  t(vst_matrix)
+)
+
+
+##############################
+# 16. CREATE UMAP DATA
+##############################
+
+umap_df <- data.frame(
+
+  Sample = rownames(
+    um$layout
+  ),
+
+  UMAP1 = um$layout[, 1],
+
+  UMAP2 = um$layout[, 2],
+
+  Condition = metadata$Condition
+
+)
+
+
+##############################
+# 17. UMAP PLOT
+##############################
+
+p_umap <- ggplot(
+
+  umap_df,
+
+  aes(
+    x = UMAP1,
+    y = UMAP2,
+    colour = Condition
+  )
+
+) +
+
+  geom_point(
+    size = 4
+  ) +
+
+  geom_text_repel(
+    aes(
+      label = Sample
+    ),
+    size = 3,
+    max.overlaps = Inf
+  ) +
+
+  labs(
+
+    title = "UMAP of VST-Transformed Expression",
+
+    x = "UMAP 1",
+
+    y = "UMAP 2",
+
+    colour = "Condition"
+
+  ) +
+
+  theme_classic(
+    base_size = 14
+  )
+
+
+##############################
+# 18. SAVE UMAP
+##############################
+
+ggsave(
+
+  file.path(
+    output_dir,
+    "UMAP_VST.png"
+  ),
+
+  p_umap,
+
+  width = 10,
+
+  height = 8,
+
+  dpi = 600
+
+)
+
+
+###############################################################
+# PART C — VOLCANO PLOT
+###############################################################
+
+##############################
+# 19. READ DE RESULTS
+##############################
+
+deg <- read.xlsx(
+  deg_file
+)
+
+
+##############################
+# 20. CHECK REQUIRED COLUMNS
+##############################
+
+required_deg <- c(
+  "Gene",
+  "log2FoldChange",
+  "padj"
+)
+
+missing_deg <- setdiff(
+  required_deg,
+  colnames(deg)
+)
+
+if(length(missing_deg) > 0){
+
+  stop(
+    paste(
+      "Missing DE columns:",
+      paste(
+        missing_deg,
+        collapse = ", "
+      )
+    )
+  )
+
+}
+
+
+##############################
+# 21. PREPARE VOLCANO DATA
+##############################
+
+volcano_df <- deg %>%
+
+  filter(
+
+    !is.na(
+      log2FoldChange
+    ),
+
+    !is.na(
+      padj
+    ),
+
+    padj > 0
+
+  ) %>%
+
+  mutate(
+
+    neg_log10_padj =
+      -log10(padj),
+
+    Significance = case_when(
+
+      padj < PADJ_CUTOFF &
+        log2FoldChange >= LOG2FC_CUTOFF
+        ~ "Upregulated",
+
+      padj < PADJ_CUTOFF &
+        log2FoldChange <= -LOG2FC_CUTOFF
+        ~ "Downregulated",
+
+      TRUE
+        ~ "Not Significant"
+
+    )
+
+  )
+
+
+##############################
+# 22. SELECT TOP UP/DOWN GENES
+##############################
+
+top_up <- volcano_df %>%
+
+  filter(
+    Significance == "Upregulated"
+  ) %>%
+
+  arrange(
+    padj
+  ) %>%
+
+  slice_head(
+    n = TOP_N_LABELS
+  )
+
+
+top_down <- volcano_df %>%
+
+  filter(
+    Significance == "Downregulated"
+  ) %>%
+
+  arrange(
+    padj
+  ) %>%
+
+  slice_head(
+    n = TOP_N_LABELS
+  )
+
+
+top_labels <- bind_rows(
+  top_up,
+  top_down
+)
+
+
+##############################
+# 23. VOLCANO PLOT
+##############################
+
+p_volcano <- ggplot(
+
+  volcano_df,
+
+  aes(
+    x = log2FoldChange,
+    y = neg_log10_padj
+  )
+
+) +
+
+  geom_point(
+    aes(
+      colour = Significance
+    ),
+    size = 2.5,
+    alpha = 0.75
+  ) +
+
+  geom_vline(
+
+    xintercept =
+      c(
+        -LOG2FC_CUTOFF,
+        LOG2FC_CUTOFF
+      ),
+
+    linetype = "dashed"
+
+  ) +
+
+  geom_hline(
+
+    yintercept =
+      -log10(
+        PADJ_CUTOFF
+      ),
+
+    linetype = "dashed"
+
+  ) +
+
+  geom_text_repel(
+
+    data = top_labels,
+
+    aes(
+      label = Gene
+    ),
+
+    size = 3.5,
+
+    max.overlaps = Inf
+
+  ) +
+
+  labs(
+
+    title = "Differential Expression Volcano Plot",
+
+    subtitle = paste0(
+      "padj < ",
+      PADJ_CUTOFF,
+      " | |log2FC| ≥ ",
+      LOG2FC_CUTOFF,
+      " | Top ",
+      TOP_N_LABELS,
+      " up/down genes labelled"
+    ),
+
+    x = "log2 Fold Change",
+
+    y = "-log10 Adjusted P-value",
+
+    colour = "Category"
+
+  ) +
+
+  theme_classic(
+    base_size = 14
+  )
+
+
+##############################
+# 24. SAVE VOLCANO
+##############################
+
+ggsave(
+
+  file.path(
+    output_dir,
+    "Volcano_Plot.png"
+  ),
+
+  p_volcano,
+
+  width = 11,
+
+  height = 8,
+
+  dpi = 600
+
+)
+
+
+###############################################################
+# PART D — HEATMAP
+###############################################################
+
+##############################
+# 25. SELECT SIGNIFICANT GENES
+##############################
+
+significant_genes <- volcano_df %>%
+
+  filter(
+
+    padj < PADJ_CUTOFF,
+
+    abs(log2FoldChange) >=
+      LOG2FC_CUTOFF
+
+  ) %>%
+
+  arrange(
+    padj
+  )
+
+
+##############################
+# 26. SELECT TOP GENES
+##############################
+
+top_heatmap_genes <-
+
+  head(
+
+    significant_genes$Gene,
+
+    TOP_N_HEATMAP
+
+  )
+
+
+##############################
+# 27. CHECK HEATMAP SIZE
+##############################
+
+if(
+  length(top_heatmap_genes) == 0
+){
+
+  warning(
+    "No genes passed the heatmap significance criteria."
+  )
+
+} else {
+
+
+##############################
+# 28. EXTRACT VST VALUES
+##############################
+
+heatmap_matrix <-
+
+  vst_matrix[
+    top_heatmap_genes,
+    ,
+    drop = FALSE
+  ]
+
+
+##############################
+# 29. ROW-WISE Z-SCORE
+##############################
+
+heatmap_matrix_z <- t(
+  scale(
+    t(
+      heatmap_matrix
+    )
+  )
+)
+
+
+##############################
+# 30. CREATE HEATMAP
+##############################
+
+png(
+
+  filename = file.path(
+    output_dir,
+    "DEG_Heatmap_Top50.png"
+  ),
+
+  width = 2400,
+
+  height = 2200,
+
+  res = 300
+
+)
+
+pheatmap(
+
+  heatmap_matrix_z,
+
+  scale = "none",
+
+  cluster_rows = TRUE,
+
+  cluster_cols = TRUE,
+
+  show_rownames = TRUE,
+
+  show_colnames = TRUE,
+
+  annotation_col =
+    data.frame(
+      Condition =
+        metadata$Condition,
+      row.names =
+        metadata$Sample_ID
+    ),
+
+  main = paste0(
+    "Top Differentially Expressed Genes\n",
+    "padj < ",
+    PADJ_CUTOFF,
+    " | |log2FC| ≥ ",
+    LOG2FC_CUTOFF
+  ),
+
+  border_color = NA
+
+)
+
+dev.off()
+
+}
+
+
+###############################################################
+# 31. SAVE VISUALIZATION SUMMARY
+###############################################################
+
+visualization_summary <- data.frame(
+
+  Plot = c(
+    "PCA",
+    "UMAP",
+    "Volcano",
+    "Heatmap"
+  ),
+
+  Input = c(
+    "VST",
+    "VST",
+    "DESeq2 Wald results",
+    "VST + significant DEGs"
+  ),
+
+  Output = c(
+    "PCA_VST.png",
+    "UMAP_VST.png",
+    "Volcano_Plot.png",
+    "DEG_Heatmap_Top50.png"
+  )
+
+)
+
+
+write.xlsx(
+
+  visualization_summary,
+
+  file.path(
+    output_dir,
+    "Visualization_Summary.xlsx"
+  ),
+
+  overwrite = TRUE
+
+)
+
+
+###############################################################
+# END OF STEP 7
+###############################################################
